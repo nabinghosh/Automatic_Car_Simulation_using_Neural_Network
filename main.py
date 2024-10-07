@@ -1,236 +1,310 @@
-#! D:\wwwch\Documents\Projects\Python\RL_based_Automatic_Car_Simulation\.venv\Scripts\python.exe
-import pygame
-from pygame.locals import *
+import math
+import pickle
 import random
+import sys
+import os
+import matplotlib.pyplot as plt
+import neat
+import pygame
 
-pygame.init()
+# Constants
+# WIDTH = 1600
+# HEIGHT = 880
 
-# create the window
-width = 500
-height = 500
-screen_size = (width, height)
-screen = pygame.display.set_mode(screen_size)
-pygame.display.set_caption('Car Game')
+WIDTH = 1920
+HEIGHT = 1080
 
-# colors
-gray = (100, 100, 100)
-green = (76, 200, 67)
-red = (200, 0, 0)
-white = (255, 255, 255)
-yellow = (255, 232, 0)
+CAR_SIZE_X = 60    
+CAR_SIZE_Y = 60
 
-# road and marker sizes
-road_width = 300
-marker_width = 10
-marker_height = 50
+BORDER_COLOR = (255, 255, 255, 255) # Color To Crash on Hit
 
-# lane coordinates
-left_lane = 150
-center_lane = 250
-right_lane = 350
-lanes = [left_lane, center_lane, right_lane]
+current_generation = 0 # Generation counter
 
-# road and edge markers
-road = (100, 0, road_width, height)
-left_edge_marker = (95, 0, marker_width, height)
-right_edge_marker = (395, 0, marker_width, height)
+class Car:
 
-# for animating movement of the lane markers
-lane_marker_move_y = 0
+    def __init__(self):
+        # Load Car Sprite and Rotate
+        self.sprite = pygame.image.load('car.png').convert() # Convert Speeds Up A Lot
+        self.sprite = pygame.transform.scale(self.sprite, (CAR_SIZE_X, CAR_SIZE_Y))
+        self.rotated_sprite = self.sprite 
 
-# player's starting coordinates
-player_x = 250
-player_y = 400
+        self.position = [830, 920] # Starting Position
+        self.angle = 0
+        self.speed = 0
 
-# frame settings
-clock = pygame.time.Clock()
-fps = 120
+        self.speed_set = False # Flag For Default Speed Later on
 
-# game settings
-gameover = False
-speed = 2
-score = 0
+        self.center = [self.position[0] + CAR_SIZE_X / 2, self.position[1] + CAR_SIZE_Y / 2] # Calculate Center
 
-class Vehicle(pygame.sprite.Sprite):
+        self.radars = [] # List For Sensors / Radars
+        self.drawing_radars = [] # Radars To Be Drawn
+
+        self.alive = True # Boolean To Check If Car is Crashed
+
+        self.distance = 0 # Distance Driven
+        self.time = 0 # Time Passed
+
+    def draw(self, screen):
+        screen.blit(self.rotated_sprite, self.position) # Draw Sprite
+        self.draw_radar(screen) #OPTIONAL FOR SENSORS
+
+    def draw_radar(self, screen):
+        # Optionally Draw All Sensors / Radars
+        for radar in self.radars:
+            position = radar[0]
+            pygame.draw.line(screen, (0, 255, 0), self.center, position, 1)
+            pygame.draw.circle(screen, (0, 255, 0), position, 5)
+
+    def check_collision(self, game_map):
+        self.alive = True
+        for point in self.corners:
+            # If Any Corner Touches Border Color -> Crash
+            # Assumes Rectangle
+            if game_map.get_at((int(point[0]), int(point[1]))) == BORDER_COLOR:
+                self.alive = False
+                break
+
+    def check_radar(self, degree, game_map):
+        length = 0
+        x = int(self.center[0] + math.cos(math.radians(360 - (self.angle + degree))) * length)
+        y = int(self.center[1] + math.sin(math.radians(360 - (self.angle + degree))) * length)
+
+        # While We Don't Hit BORDER_COLOR AND length < 300 (just a max) -> go further and further
+        while not game_map.get_at((x, y)) == BORDER_COLOR and length < 300:
+            length = length + 1
+            x = int(self.center[0] + math.cos(math.radians(360 - (self.angle + degree))) * length)
+            y = int(self.center[1] + math.sin(math.radians(360 - (self.angle + degree))) * length)
+
+        # Calculate Distance To Border And Append To Radars List
+        dist = int(math.sqrt(math.pow(x - self.center[0], 2) + math.pow(y - self.center[1], 2)))
+        self.radars.append([(x, y), dist])
     
-    def __init__(self, image, x, y):
-        pygame.sprite.Sprite.__init__(self)
+    def update(self, game_map):
+        # Set The Speed To 20 For The First Time
+        # Only When Having 4 Output Nodes With Speed Up and Down
+        if not self.speed_set:
+            self.speed = 20
+            self.speed_set = True
+
+        # Get Rotated Sprite And Move Into The Right X-Direction
+        # Don't Let The Car Go Closer Than 20px To The Edge
+        self.rotated_sprite = self.rotate_center(self.sprite, self.angle)
+        self.position[0] += math.cos(math.radians(360 - self.angle)) * self.speed
+        self.position[0] = max(self.position[0], 20)
+        self.position[0] = min(self.position[0], WIDTH - 120)
+
+        # Increase Distance and Time
+        self.distance += self.speed
+        self.time += 1
         
-        # scale the image down so it's not wider than the lane
-        image_scale = 45 / image.get_rect().width
-        new_width = image.get_rect().width * image_scale
-        new_height = image.get_rect().height * image_scale
-        self.image = pygame.transform.scale(image, (new_width, new_height))
-        
-        self.rect = self.image.get_rect()
-        self.rect.center = [x, y]
-        
-class PlayerVehicle(Vehicle):
-    
-    def __init__(self, x, y):
-        image = pygame.image.load('images/car.png')
-        super().__init__(image, x, y)
-        
-# sprite groups
-player_group = pygame.sprite.Group()
-vehicle_group = pygame.sprite.Group()
+        # Same For Y-Position
+        self.position[1] += math.sin(math.radians(360 - self.angle)) * self.speed
+        self.position[1] = max(self.position[1], 20)
+        self.position[1] = min(self.position[1], HEIGHT - 120)
 
-# create the player's car
-player = PlayerVehicle(player_x, player_y)
-player_group.add(player)
+        # Calculate New Center
+        self.center = [int(self.position[0]) + CAR_SIZE_X / 2, int(self.position[1]) + CAR_SIZE_Y / 2]
 
-# load the vehicle images
-image_filenames = ['pickup_truck.png', 'semi_trailer.png', 'taxi.png', 'van.png']
-vehicle_images = []
-for image_filename in image_filenames:
-    image = pygame.image.load('images/' + image_filename)
-    vehicle_images.append(image)
-    
-# load the crash image
-crash = pygame.image.load('images/crash.png')
-crash_rect = crash.get_rect()
+        # Calculate Four Corners
+        # Length Is Half The Side
+        length = 0.5 * CAR_SIZE_X
+        left_top = [self.center[0] + math.cos(math.radians(360 - (self.angle + 30))) * length, self.center[1] + math.sin(math.radians(360 - (self.angle + 30))) * length]
+        right_top = [self.center[0] + math.cos(math.radians(360 - (self.angle + 150))) * length, self.center[1] + math.sin(math.radians(360 - (self.angle + 150))) * length]
+        left_bottom = [self.center[0] + math.cos(math.radians(360 - (self.angle + 210))) * length, self.center[1] + math.sin(math.radians(360 - (self.angle + 210))) * length]
+        right_bottom = [self.center[0] + math.cos(math.radians(360 - (self.angle + 330))) * length, self.center[1] + math.sin(math.radians(360 - (self.angle + 330))) * length]
+        self.corners = [left_top, right_top, left_bottom, right_bottom]
 
-# game loop
-running = True
-while running:
-    
-    clock.tick(fps)
-    
-    for event in pygame.event.get():
-        if event.type == QUIT:
-            running = False
-            
-        # move the player's car using the left/right arrow keys
-        if event.type == KEYDOWN:
-            
-            if event.key == K_LEFT and player.rect.center[0] > left_lane:
-                player.rect.x -= 100
-            elif event.key == K_RIGHT and player.rect.center[0] < right_lane:
-                player.rect.x += 100
-                
-            # check if there's a side swipe collision after changing lanes
-            for vehicle in vehicle_group:
-                if pygame.sprite.collide_rect(player, vehicle):
-                    
-                    gameover = True
-                    
-                    # place the player's car next to other vehicle
-                    # and determine where to position the crash image
-                    if event.key == K_LEFT:
-                        player.rect.left = vehicle.rect.right
-                        crash_rect.center = [player.rect.left, (player.rect.center[1] + vehicle.rect.center[1]) / 2]
-                    elif event.key == K_RIGHT:
-                        player.rect.right = vehicle.rect.left
-                        crash_rect.center = [player.rect.right, (player.rect.center[1] + vehicle.rect.center[1]) / 2]
-            
-            
-    # draw the grass
-    screen.fill(green)
-    
-    # draw the road
-    pygame.draw.rect(screen, gray, road)
-    
-    # draw the edge markers
-    pygame.draw.rect(screen, yellow, left_edge_marker)
-    pygame.draw.rect(screen, yellow, right_edge_marker)
-    
-    # draw the lane markers
-    lane_marker_move_y += speed * 2
-    if lane_marker_move_y >= marker_height * 2:
-        lane_marker_move_y = 0
-    for y in range(marker_height * -2, height, marker_height * 2):
-        pygame.draw.rect(screen, white, (left_lane + 45, y + lane_marker_move_y, marker_width, marker_height))
-        pygame.draw.rect(screen, white, (center_lane + 45, y + lane_marker_move_y, marker_width, marker_height))
-        
-    # draw the player's car
-    player_group.draw(screen)
-    
-    # add a vehicle
-    if len(vehicle_group) < 2:
-        
-        # ensure there's enough gap between vehicles
-        add_vehicle = True
-        for vehicle in vehicle_group:
-            if vehicle.rect.top < vehicle.rect.height * 1.5:
-                add_vehicle = False
-                
-        if add_vehicle:
-            
-            # select a random lane
-            lane = random.choice(lanes)
-            
-            # select a random vehicle image
-            image = random.choice(vehicle_images)
-            vehicle = Vehicle(image, lane, height / -2)
-            vehicle_group.add(vehicle)
-    
-    # make the vehicles move
-    for vehicle in vehicle_group:
-        vehicle.rect.y += speed
-        
-        # remove vehicle once it goes off screen
-        if vehicle.rect.top >= height:
-            vehicle.kill()
-            
-            # add to score
-            score += 1
-            
-            # speed up the game after passing 7 vehicles
-            if score > 0 and score % 7 == 0:
-                speed += 1
-    
-    # draw the vehicles
-    vehicle_group.draw(screen)
-    
-    # display the score
-    font = pygame.font.Font(pygame.font.get_default_font(), 16)
-    text = font.render('Score: ' + str(score), True, white)
-    text_rect = text.get_rect()
-    text_rect.center = (50, 400)
-    screen.blit(text, text_rect)
-    
-    # check if there's a head on collision
-    if pygame.sprite.spritecollide(player, vehicle_group, True):
-        gameover = True
-        crash_rect.center = [player.rect.center[0], player.rect.top]
-            
-    # display game over
-    if gameover:
-        screen.blit(crash, crash_rect)
-        
-        pygame.draw.rect(screen, red, (0, 50, width, 100))
-        
-        font = pygame.font.Font(pygame.font.get_default_font(), 16)
-        text = font.render('Game over. Play again? (Enter Y or N)', True, white)
-        text_rect = text.get_rect()
-        text_rect.center = (width / 2, 100)
-        screen.blit(text, text_rect)
-            
-    pygame.display.update()
+        # Check Collisions And Clear Radars
+        self.check_collision(game_map)
+        self.radars.clear()
 
-    # wait for user's input to play again or exit
-    while gameover:
-        
-        clock.tick(fps)
-        
+        # From -90 To 120 With Step-Size 45 Check Radar
+        for d in range(-90, 120, 45):
+            self.check_radar(d, game_map)
+
+    def get_data(self):
+        # Get Distances To Border
+        radars = self.radars
+        return_values = [0, 0, 0, 0, 0]
+        for i, radar in enumerate(radars):
+            return_values[i] = int(radar[1] / 30)
+
+        return return_values
+
+    def is_alive(self):
+        # Basic Alive Function
+        return self.alive
+
+    def get_reward(self):
+        # Calculate Reward (Maybe Change?)
+        return self.distance / (CAR_SIZE_X / 2)
+
+    def rotate_center(self, image, angle):
+        # Rotate The Rectangle
+        rectangle = image.get_rect()
+        rotated_image = pygame.transform.rotate(image, angle)
+        rotated_rectangle = rectangle.copy()
+        rotated_rectangle.center = rotated_image.get_rect().center
+        rotated_image = rotated_image.subsurface(rotated_rectangle).copy()
+        return rotated_image
+
+def visualize_stats(stats):
+    generation = range(len(stats.most_fit_genomes))
+    best_fitness = [c.fitness for c in stats.most_fit_genomes]
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(generation, best_fitness, label="Best Fitness")
+    plt.xlabel("Generation")
+    plt.ylabel("Fitness")
+    plt.title("Best Fitness Over Generations")
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+def load_winner(filename):
+    with open(filename, 'rb') as f:
+        winner = pickle.load(f)
+    return winner
+
+def run_simulation(genomes, config):
+    
+    # Empty Collections For Nets and Cars
+    nets = []
+    cars = []
+
+    # Initialize PyGame And The Display
+    pygame.init()
+    screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN)
+
+    # For All Genomes Passed Create A New Neural Network
+    for i, g in genomes:
+        net = neat.nn.FeedForwardNetwork.create(g, config)
+        nets.append(net)
+        g.fitness = 0
+
+        cars.append(Car())
+
+    # Clock Settings
+    # Font Settings & Loading Map
+    clock = pygame.time.Clock()
+    generation_font = pygame.font.SysFont("Arial", 30)
+    alive_font = pygame.font.SysFont("Arial", 20)
+    game_map = pygame.image.load('map.png').convert() # Convert Speeds Up A Lot
+
+    global current_generation
+    current_generation += 1
+
+    # Simple Counter To Roughly Limit Time (Not Good Practice)
+    counter = 0
+
+    while True:
+        # Exit On Quit Event
         for event in pygame.event.get():
-            
-            if event.type == QUIT:
-                gameover = False
-                running = False
-                
-            # get the user's input (y or n)
-            if event.type == KEYDOWN:
-                if event.key == K_y:
-                    # reset the game
-                    gameover = False
-                    speed = 2
-                    score = 0
-                    vehicle_group.empty()
-                    player.rect.center = [player_x, player_y]
-                elif event.key == K_n:
-                    # exit the loops
-                    gameover = False
-                    running = False
+            if event.type == pygame.QUIT:
+                sys.exit(0)
 
-pygame.quit()
+        # For Each Car Get The Action It Takes
+        for i, car in enumerate(cars):
+            output = nets[i].activate(car.get_data())
+            choice = output.index(max(output))
+            if choice == 0:
+                car.angle += 10 # Left
+            elif choice == 1:
+                car.angle -= 10 # Right
+            elif choice == 2:
+                if(car.speed - 2 >= 12):
+                    car.speed -= 2 # Slow Down
+            else:
+                car.speed += 2 # Speed Up
+        
+        # Check If Car Is Still Alive
+        # Increase Fitness If Yes And Break Loop If Not
+        still_alive = 0
+        for i, car in enumerate(cars):
+            if car.is_alive():
+                still_alive += 1
+                car.update(game_map)
+                genomes[i][1].fitness += car.get_reward()
+
+        if still_alive == 0:
+            break
+
+        counter += 1
+        if counter == 30 * 40: # Stop After About 20 Seconds
+            break
+
+        # Draw Map And All Cars That Are Alive
+        screen.blit(game_map, (0, 0))
+        for car in cars:
+            if car.is_alive():
+                car.draw(screen)
+        
+        # Display Info
+        text = generation_font.render("Generation: " + str(current_generation), True, (0,0,0))
+        text_rect = text.get_rect()
+        text_rect.center = (900, 450)
+        screen.blit(text, text_rect)
+
+        text = alive_font.render("Still Alive: " + str(still_alive), True, (0, 0, 0))
+        text_rect = text.get_rect()
+        text_rect.center = (900, 490)
+        screen.blit(text, text_rect)
+
+        pygame.display.flip()
+        clock.tick(60) # 60 FPS
+
+if __name__ == "__main__":
+    
+    # Load Config
+    config_path = "./config.txt"
+    config = neat.config.Config(neat.DefaultGenome,
+                                neat.DefaultReproduction,
+                                neat.DefaultSpeciesSet,
+                                neat.DefaultStagnation,
+                                config_path)
+
+    # Create Population And Add Reporters
+    population = neat.Population(config)
+    population.add_reporter(neat.StdOutReporter(True))
+    stats = neat.StatisticsReporter()
+    population.add_reporter(stats)
+    
+    # Add Checkpointer to save progress
+    population.add_reporter(neat.Checkpointer(generation_interval=10, time_interval_seconds=None))
+
+    # Run Simulation For A Maximum of 1000 Generations
+    winner = population.run(run_simulation, 10)
+
+    # Save the winner
+    with open('winner.pkl', 'wb') as f:
+        pickle.dump(winner, f)
+
+    # Visualize the statistics
+    visualize_stats(stats)
+
+    # Load the winner for further analysis or optimization
+    winner = load_winner('winner.pkl')
+
+    # Example: Print the structure of the winner genome
+    print(f'Winner Genome:\n{winner}')
+
+    # Example: Use the winner genome to initialize a new population
+    # This can be done by creating a new population with the winner genome as the initial genome
+    new_population = neat.Population(config)
+    new_population.population[0] = winner
+
+    # Add reporters to the new population
+    new_population.add_reporter(neat.StdOutReporter(True))
+    new_stats = neat.StatisticsReporter()
+    new_population.add_reporter(new_stats)
+
+    # Run the new population for further optimization
+    new_winner = new_population.run(run_simulation, 10)
+
+    # Save the new winner
+    with open('new_winner.pkl', 'wb') as f:
+        pickle.dump(new_winner, f)
+
+    # Visualize the new statistics
+    visualize_stats(new_stats)

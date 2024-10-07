@@ -1,0 +1,4 @@
+neat-python
+pygame
+Pillow
+# pip install -r requirements.txt
